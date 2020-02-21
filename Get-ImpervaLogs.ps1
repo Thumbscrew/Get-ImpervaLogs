@@ -6,6 +6,9 @@ param (
 )
 
 # Error strings
+<# $script:ConfigValidation = @{
+    "Name" = ""
+} #>
 $script:ConfigValidationFail = "validation_fail"
 $script:ConfigReadFail = "read_fail"
 
@@ -16,10 +19,13 @@ function Get-Config {
 
     if(Test-Path $ConfigFilePath) {
         $config = Get-Content $ConfigFilePath | ConvertFrom-Json
-        if(Test-Config -Config $config) {
+        $configTest = Test-Config -Config $config
+        if($configTest.overall) {
             return $config
         }
         else {
+            if()
+
             return $script:ConfigValidationFail
         }
     }
@@ -57,24 +63,23 @@ function Test-Config {
 
     if($configValidated.overall) {
         if(!(Test-Path($Config.process_dir))) {
-            $dirCreated = New-Item -ItemType Directory -Name $Config.process_dir
+            $dirCreated = New-Item -ItemType Directory -Path $Config.process_dir -Force
 
             if(!$dirCreated) {
                 $configValidated.process_dir = $false
                 $configValidated.overall = $false
             }
         }
+
+        if(!$Config.process_dir.EndsWith("\")) {
+            $Config.process_dir += "\"
+        }
     }
 
-    return $configValidated.overall
+    return $configValidated
 }
 
 function Get-NextId {
-
-    if(!$script:Config.process_dir.EndsWith("\")) {
-        $script:Config.process_dir += "\"
-    }
-
     $NextIdPath = $script:Config.process_dir + "state\nextid.txt"
 
     if(Test-Path $NextIdPath) {
@@ -125,13 +130,6 @@ function Invoke-ImpervaLogRequest {
     }
 
     return $req
-
-    # if($req.StatusCode -eq 200) {
-    #     return $req.Content
-    # }
-    # else {
-    #     return $null
-    # }
 }
 
 function Write-ImpervaLog {
@@ -200,13 +198,13 @@ function Set-NextID {
         $newId = $Id
     }
 
-    if(!$script:Config.process_dir.EndsWith("\")) {
-        $script:Config.process_dir += "\"
+    $nextIdPath = $script:Config.process_dir + "state\nextid.txt"
+
+    if(!(Test-Path -Path $nextIdPath)) {
+        New-Item -ItemType File -Path $nextIdPath -Force
     }
 
-    $NextIdPath = $script:Config.process_dir + "state\nextid.txt"
-
-    $newId | Set-Content -Path $NextIdPath
+    $newId | Set-Content -Path $nextIdPath
 }
 
 function Get-NextIdFromIndex {
@@ -252,8 +250,8 @@ while($true) {
             [byte[]]$content = $request.Content
 
             if($null -ne $content) {
-                $outputPath = $script:Config.process_dir + "\$nextId"
-                $writeSuccess = Write-ImpervaLog -LogContent $content -OutputPath ($script:Config.process_dir + "\$nextId")
+                $outputPath = $script:Config.process_dir + "$nextId"
+                $writeSuccess = Write-ImpervaLog -LogContent $content -OutputPath ($script:Config.process_dir + "$nextId")
 
                 if($writeSuccess) {
                     Write-Host "Successfully wrote log to `"$outputPath`"."
