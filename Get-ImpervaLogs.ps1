@@ -1,26 +1,81 @@
+[CmdletBinding()]
+param (
+    [Parameter(Mandatory = $true)]
+    [string]
+    $ConfigPath
+)
+
+# Error strings
+$script:ConfigValidationFail = "validation_fail"
+$script:ConfigReadFail = "read_fail"
+
 function Get-Config {
     param(
         [string]$ConfigFilePath
     )
 
     if(Test-Path $ConfigFilePath) {
-        return Get-Content $ConfigFilePath | ConvertFrom-Json
+        $config = Get-Content $ConfigFilePath | ConvertFrom-Json
+        if(Test-Config -Config $config) {
+            return $config
+        }
+        else {
+            return $script:ConfigValidationFail
+        }
     }
     else {
-        return $null
+        return $script:ConfigReadFail
     }
 }
 
-function Get-NextId {
+function Test-Config {
     param(
-        [string]$ProcessDir
+        [psobject]$Config
     )
 
-    if(!$ProcessDir.EndsWith("\")) {
-        $ProcessDir += "\"
+    $configValidated = [PSCustomObject]@{
+        overall = $true
+        api = $true
+        process_dir = $true
+        base_url = $true
     }
 
-    $NextIdPath = $ProcessDir + "state\nextid.txt"
+    if($Config.api_id.Equals("") -or $Config.api_key.Equals("")) {
+        $configValidated.api = $false
+        $configValidated.overall = $false
+    }
+    
+    if($Config.process_dir.Equals("")) {
+        $configValidated.process_dir = $false
+        $configValidated.overall = $false
+    }
+    
+    if($Config.base_url.Equals("")) {
+        $configValidated.base_url = $false
+        $configValidated.overall = $false
+    }
+
+    if($configValidated.overall) {
+        if(!(Test-Path($Config.process_dir))) {
+            $dirCreated = New-Item -ItemType Directory -Name $Config.process_dir
+
+            if(!$dirCreated) {
+                $configValidated.process_dir = $false
+                $configValidated.overall = $false
+            }
+        }
+    }
+
+    return $configValidated.overall
+}
+
+function Get-NextId {
+
+    if(!$script:Config.process_dir.EndsWith("\")) {
+        $script:Config.process_dir += "\"
+    }
+
+    $NextIdPath = $script:Config.process_dir + "state\nextid.txt"
 
     if(Test-Path $NextIdPath) {
         $nextIdContent = Get-Content $NextIdPath
@@ -51,14 +106,11 @@ function Get-AuthorizationHeader {
 
 function Invoke-ImpervaLogRequest {
     param(
-        [string]$BaseUri,
-        [string]$Id,
-        [string]$ApiId,
-        [string]$ApiKey
+        [string]$Id
     )
 
-    $headers = Get-AuthorizationHeader -ApiId $ApiId -ApiKey $ApiKey
-    $uri = "$BaseUri" + "$Id"
+    $headers = Get-AuthorizationHeader -ApiId $script:Config.api_id -ApiKey $script:Config.api_key
+    $uri = $script:Config.base_url + $Id
 
     try {
         $req = Invoke-WebRequest -Uri $uri -Headers $headers
@@ -133,8 +185,7 @@ function Write-ImpervaLog {
 function Set-NextID {
     param(
         [switch]$Increment,
-        [string]$Id,
-        [string]$ProcessDir
+        [string]$Id
     )
 
     if($Increment) {
@@ -149,11 +200,11 @@ function Set-NextID {
         $newId = $Id
     }
 
-    if(!$ProcessDir.EndsWith("\")) {
-        $ProcessDir += "\"
+    if(!$script:Config.process_dir.EndsWith("\")) {
+        $script:Config.process_dir += "\"
     }
 
-    $NextIdPath = $ProcessDir + "state\nextid.txt"
+    $NextIdPath = $script:Config.process_dir + "state\nextid.txt"
 
     $newId | Set-Content -Path $NextIdPath
 }
@@ -170,36 +221,34 @@ function Get-NextIdFromIndex {
     return $firstAvailable
 }
 
-# Script starts
-# Reads config
-# Reads next ID
-# Attempts to download next log via ID
-# Saves log locally
-# Sets next ID
-
-Write-Host "Loading config file $($args[0])."
-$script:Config = Get-Config $args[0]
+Write-Host "Loading config file $ConfigPath."
+$script:Config = Get-Config $ConfigPath
 
 # TODO: Validate config
 
-if($null -eq $script:Config) {
-    Write-Error "Unable to read $ConfigFilePath - check if file exists and permissions are correct."
+if($script:Config -eq $script:ConfigValidationFail) {
+    Write-Error "Config failed validation. Exiting..."
+    exit 3
+}
+
+if($script:Config -eq $script:ConfigReadFail) {
+    Write-Error "Unable to read $ConfigPath - check if file exists and permissions are correct. Exiting..."
     exit 1
 }
 
-$retryCount = 0
-$404retryCount = 0
+$retryCount = 1
+$404retryCount = 1
 
 # Main script loop
 while($true) {
-    $nextId = Get-NextId $script:Config.process_dir
+    $nextId = Get-NextId
 
     if($nextId -ne -1) {
         Write-Host "Attempting to download log $nextId..."
-        $request = Invoke-ImpervaLogRequest -BaseUri $script:Config.base_url -id $nextId -ApiId $script:Config.api_id -ApiKey $script:Config.api_key
+        $request = Invoke-ImpervaLogRequest -id $nextId
 
         if($request.StatusCode -eq 200) {
-            $404retryCount = 0
+            $404retryCount = 1
             [byte[]]$content = $request.Content
 
             if($null -ne $content) {
@@ -208,16 +257,16 @@ while($true) {
 
                 if($writeSuccess) {
                     Write-Host "Successfully wrote log to `"$outputPath`"."
-                    $retryCount = 0
-                    Set-NextId -Increment -Id $nextId -ProcessDir $script:Config.process_dir
+                    $retryCount = 1
+                    Set-NextId -Increment -Id $nextId
                     
                     Write-Host "Sleeping for $($script:Config.sleep_time_success) seconds..."
                     Start-Sleep -Seconds $script:Config.sleep_time_success
                 }
                 else {
                     if($retryCount -lt $script:Config.max_retry) {
-                        $retryCount++
                         Write-Warning "Failed to write file $outputPath. This is try number $retryCount. Sleeping for $($script:Config.sleep_time_error) seconds before trying again..."
+                        $retryCount++
                         Start-Sleep -Seconds $script:Config.sleep_time_error
                     }
                     else {
@@ -232,12 +281,13 @@ while($true) {
         }
         elseif($request.StatusCode -eq 404) {
             if($404retryCount -lt $script:Config.max_retry) {
-                $404retryCount++
                 Write-Host "Received 404 response for log $nextId. This is try $404retryCount out of $($script:Config.max_retry). Log probably doesn't exist yet. Sleeping for $($script:Config.sleep_time_error) seconds before trying again."
+                $404retryCount++
                 Start-Sleep -Seconds $script:Config.sleep_time_error
             }
             else {
-                $nextId = -1
+                Write-Host "Received 404 response for log $nextId. This is try $404retryCount out of $($script:Config.max_retry). Will now check log index for available logs."
+                Set-NextID -Id "-1"
             }
         }
     }
@@ -245,6 +295,6 @@ while($true) {
         Write-Host "Retrieving first available log from the index..."
         $nextId = Get-NextIdFromIndex
         Write-Host "First available log is $nextId."
-        Set-NextId -Id $nextId -ProcessDir $script:Config.process_dir
+        Set-NextId -Id $nextId
     }
 }
