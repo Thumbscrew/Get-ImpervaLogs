@@ -24,8 +24,6 @@ function Get-Config {
             return $config
         }
         else {
-            if()
-
             return $script:ConfigValidationFail
         }
     }
